@@ -16,6 +16,8 @@ try:
 except FileNotFoundError:
     EXPORTED_IDENTIFIERS = set()
 
+session = requests.Session()  # Persistent session for performance
+
 def map_metadata_to_omeka_s(classic_data):
     element_texts = classic_data.get("element_texts", [])
     omeka_s_data = {}
@@ -32,7 +34,7 @@ def map_metadata_to_omeka_s(classic_data):
 
 def fetch_classic_item(source_base, item_id):
     url = f"{source_base}/items/{item_id}"
-    response = requests.get(url, verify=False)
+    response = session.get(url, verify=False)
     if response.status_code == 200:
         return response.json()
     return None
@@ -53,33 +55,40 @@ def fetch_file_urls(item_data):
 
 def get_auth_headers(api_key):
     return {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {api_key.strip()}",
         "Content-Type": "application/json"
     }
-    
 
 def check_duplicate_item(dest_base, api_key, identifier):
+    identifier = identifier.strip()
     if identifier in EXPORTED_IDENTIFIERS:
         return True
 
     url = f"{dest_base}/items"
-    params = {"per_page": 1000, "sort_by": "id", "sort_order": "desc"}
+    params = {
+        "property[0][property]": "dcterms:identifier",
+        "property[0][type]": "eq",
+        "property[0][text]": identifier
+    }
     headers = get_auth_headers(api_key)
-    response = requests.get(url, params=params, headers=headers, verify=False)
+    response = session.get(url, params=params, headers=headers, verify=False)
     if response.status_code == 200:
         items = response.json()
-        for item in items:
-            for value in item.get("dcterms:identifier", []):
-                if value.get("@value") == identifier:
-                    return True
+        return len(items) > 0
     return False
 
 def create_item_omeka_s(dest_base, api_key, metadata):
     url = f"{dest_base}/items"
-    response = requests.post(url, headers=get_auth_headers(api_key), data=json.dumps(metadata), verify=False)
-    print(f"DEBUG: {response.status_code} - {response.text}")
-    if response.status_code == 201:
-        return response.json().get("o:id")
+    headers = get_auth_headers(api_key)
+    try:
+        response = session.post(url, headers=headers, data=json.dumps(metadata), verify=False)
+        print(f"DEBUG [create_item]: {response.status_code} - {response.text}")
+        if response.status_code == 201:
+            return response.json().get("o:id")
+        else:
+            print(f"[ERROR] Failed to create item. Status: {response.status_code}, Response: {response.text}")
+    except requests.RequestException as e:
+        print(f"[EXCEPTION] Network or connection error during item creation: {e}")
     return None
 
 def upload_media_to_item(dest_base, api_key, file_url, item_id):
@@ -88,11 +97,20 @@ def upload_media_to_item(dest_base, api_key, file_url, item_id):
         "o:item": {"o:id": item_id},
         "o:source": file_url
     }
-    response = requests.post(media_url, data=data, headers=get_auth_headers(api_key), verify=False)
-    return response.status_code == 201
+    headers = get_auth_headers(api_key)
+    try:
+        response = session.post(media_url, headers=headers, data=json.dumps(data), verify=False)
+        print(f"DEBUG [upload_media]: {response.status_code} - {response.text}")
+        if response.status_code == 201:
+            return True
+        else:
+            print(f"[ERROR] Failed to upload media. Status: {response.status_code}, Response: {response.text}")
+    except requests.RequestException as e:
+        print(f"[EXCEPTION] Network or connection error during media upload: {e}")
+    return False
 
 def save_known_identifier(identifier):
-    EXPORTED_IDENTIFIERS.add(identifier)
+    EXPORTED_IDENTIFIERS.add(identifier.strip())
     with open("known_identifiers.json", "w", encoding="utf-8") as f:
         json.dump(list(EXPORTED_IDENTIFIERS), f, indent=2)
 
